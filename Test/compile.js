@@ -1,0 +1,1 @@
+Statify.Write("hi");
