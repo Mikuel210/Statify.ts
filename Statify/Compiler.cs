@@ -1,84 +1,105 @@
 ﻿using System.Diagnostics;
-using Microsoft.ClearScript;
-using Microsoft.ClearScript.V8;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Statify;
 
-public static class Compiler
-{
-    private const string EngineTemplate = @"
-        var console = {
-            log: function(message) {
-                host.Console.WriteLine(message);
-            }
-        };
-    ";
+public static class Compiler {
 
-    public static void Compile()
-    {
-        ConsoleWriter.Title("Compiling project...");
+	private const string FinishCompilationCode = "STATIFY_END_COMPILATION";
 
-        var compileFileRelativePath =
-            ConfigurationManager.GetConfigurationValue<string>(ConfigurationManager.CompileFileKey);
+	private static string GetEngineTemplate(string relativeScriptPath) =>
+		$$"""
+			  require('ts-node').register({ compilerOptions: { module: 'CommonJS' } }); 
+			  require('./{{relativeScriptPath}}');
+			  console.log('{{FinishCompilationCode}}');
+			  """.Replace("\n", "");
 
-        var compileFileFullPath = PathUtilities.RelativeToProjectDirectory(compileFileRelativePath);
-        var compileFileContents = File.ReadAllText(compileFileFullPath);
+	public static void Compile() {
+		ConsoleWriter.Title("Compiling project...");
 
-        if (Path.GetExtension(compileFileFullPath) == ".ts")
-            compileFileContents = compileFileFullPath;
+		var compileFileRelativePath =
+			ConfigurationManager.GetConfigurationValue<string>(ConfigurationManager.CompileFileKey);
 
-        using (var engine = new V8ScriptEngine())
-        {
-            engine.AddHostObject("host", new HostFunctions());
-            engine.AddHostType("Statify", typeof(Api));
+		var process = new Process {
+			StartInfo = new() {
+				FileName = "node",
+				Arguments = $"-e \"{GetEngineTemplate(compileFileRelativePath)}\"",
+				RedirectStandardInput = true,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				UseShellExecute = false,
+				CreateNoWindow = true
+			}
+		};
 
-            try
-            {
-                engine.Execute(EngineTemplate);
-                engine.Execute(compileFileContents);
-            }
-            catch (Exception e)
-            {
-                ConsoleWriter.Fatal("Error while executing compile file:");
-                Console.WriteLine(e.Message);
-            }
-        }
-    }
+		process.Start();
 
-    private static string CompileTypeScript(string path)
-    {
-        var outputPath = Path.Join(PathUtilities.TempDirectory, Path.GetRandomFileName());
-        outputPath = Path.GetFullPath(outputPath);
+		StreamReader standardOutput = process.StandardOutput;
+		StreamWriter standardInput = process.StandardInput;
 
-        ConsoleWriter.Title($"\"{path}\" --outFile \"{outputPath}\"");
+		var ended = false;
 
-        File.WriteAllText(outputPath, string.Empty);
+		while (!ended) {
+			string line = standardOutput.ReadLine()!;
 
-        var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "tsc",
-                Arguments = $"\"{path}\" --outFile \"{outputPath}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
+			try {
+				var packet = JsonSerializer.Deserialize<Packet>(line)!;
+				packet.Process();
 
-        process.Start();
-        process.WaitForExit();
+				standardInput.WriteLine(true);
+				standardInput.Flush();
+			}
+			catch (JsonException) {
+				if (line == FinishCompilationCode)
+					ended = true;
+				else
+					Console.WriteLine(line);
+			}
+			catch (Exception e) when
+				(e is InvalidOperationException or TargetParameterCountException) {
+				standardInput.WriteLine(false);
+				standardInput.Flush();
+			}
+		}
 
-        if (process.ExitCode != 0)
-        {
-            var errors = process.StandardError.ReadToEnd();
-            throw new Exception($"TypeScript compilation failed: {errors}");
-        }
+		ConsoleWriter.Success("Compilation was successful.");
 
-        var result = File.ReadAllText(outputPath);
-        File.Delete(outputPath);
+		string error = process.StandardError.ReadToEnd();
 
-        return result;
-    }
+		if (!string.IsNullOrEmpty(error)) {
+			ConsoleWriter.Fatal("An error occured while executing the compile file:");
+			Console.WriteLine(error);
+		}
+	}
+
+	private class Packet {
+
+		public enum EFunction { Write = 0, Compile = 1 }
+		[JsonPropertyName("function")] public EFunction Function { get; init; }
+
+		[JsonPropertyName("parameters")] public JsonElement Parameters { get; init; }
+
+		public void Process() {
+			MethodInfo method = typeof(Api).GetMethod(Function.ToString()) ??
+								throw new ArgumentException(
+									"The function enum value does not correspond to a valid method.");
+
+			object[] parametersArray = Parameters.EnumerateArray()
+				.Select<JsonElement, object>(e => (e.ValueKind switch {
+					JsonValueKind.String => e.GetString(),
+					JsonValueKind.Number => e.TryGetInt32(out int intValue) ? intValue : e.GetDouble(),
+					JsonValueKind.True => true,
+					JsonValueKind.False => false,
+					JsonValueKind.Object => e.Deserialize<Dictionary<string, object>>(),
+					_ => throw new FormatException("The parameter type is not supported.")
+				})!)
+				.ToArray();
+
+			method.Invoke(typeof(Api), parametersArray);
+		}
+
+	}
+
 }

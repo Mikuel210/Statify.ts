@@ -1,1 +1,4 @@
-﻿TypeScript
+﻿Node.js
+Typescript
+ts-node
+deasync
