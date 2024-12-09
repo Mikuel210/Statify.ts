@@ -1,5 +1,15 @@
-import statify from './statify'
+import statify from "statify";
 
 statify.compile({
-    "hi": "bye"
-})
+	template: `
+	
+	hi
+
+	<statify>
+	console.log("hiiii")
+	</statify>
+
+	bye
+	
+	`,
+});

@@ -14,11 +14,11 @@ public static class ConfigurationManager
     {
         DefaultConfiguration = new Dictionary<string, object>
         {
-            [CompileFileKey] = "compile.js",
+            [CompileFileKey] = "compile.ts",
             [StatifyDirectoryKey] = "./.statify/"
         };
 
-        var configurationFilePath = PathUtilities.RelativeToProjectDirectory(".statifyconfig");
+        var configurationFilePath = PathUtilities.From(PathUtilities.ProjectDirectory, ".statifyconfig");
         var configurationFileContent = string.Empty;
 
         try
